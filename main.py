@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text
@@ -7,6 +7,20 @@ import os
 import json
 import logging
 from utils import get_geojson_with_join
+import pandas as pd
+import simplekml  
+from fastapi import Request
+import io
+from fastapi.responses import StreamingResponse
+import geopandas as gpd
+from typing import Literal
+from shapely.geometry import box
+import tempfile
+
+
+
+
+
 
 # === Setup logging ===
 logger = logging.getLogger(__name__)
@@ -162,6 +176,13 @@ async def query_data(payload: dict):
                 continue
 
         return {"type": "FeatureCollection", "features": features}
+    
+
+
+
+
+
+
 
 @app.post("/save-template")
 def save_template(template: dict):
@@ -199,6 +220,81 @@ def get_column_range(table: str = Query(...), column: str = Query(...)):
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to fetch range: {str(e)}")
+        
+@app.post("/export")
+async def export_data(request: Request):
+    body = await request.json()
+    format = body.get("format")
+    data = body.get("data", {}).get("features", [])
+
+    if not data:
+        raise HTTPException(status_code=400, detail="No data provided.")
+
+    df = pd.json_normalize(data)
+
+    if format == "csv":
+        stream = io.StringIO()
+        df.to_csv(stream, index=False)
+        stream.seek(0)
+        return StreamingResponse(iter([stream.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=export.csv"})
+
+    elif format == "kml":
+        kml = simplekml.Kml()
+        for feature in data:
+            coords = feature.get("geometry", {}).get("coordinates")
+            props = feature.get("properties", {})
+            if coords and len(coords) == 2:
+                kml.newpoint(name=str(props.get("Site_ID", "")), coords=[(coords[0], coords[1])])
+        kml_bytes = kml.kml()
+        return StreamingResponse(io.BytesIO(kml_bytes.encode('utf-8')), media_type="application/vnd.google-earth.kml+xml", headers={"Content-Disposition": "attachment; filename=export.kml"})
+
+    else:
+        raise HTTPException(status_code=400, detail="Invalid format requested.")
+    
+
+@app.post("/upload-drive-test")
+async def upload_drive_test(file: UploadFile = File(...)):
+    try:
+        # Read file
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(file.file)
+        else:
+            df = pd.read_excel(file.file)
+
+        # Normalize column names
+        original_columns = df.columns
+        df.columns = [col.strip().lower() for col in original_columns]
+
+        # Detect lat/lon
+        lat_col = next((col for col in df.columns if col in ["lat", "latitude", "y"]), None)
+        lon_col = next((col for col in df.columns if col in ["lon", "lng", "long", "longitude", "x"]), None)
+
+        if not lat_col or not lon_col:
+            raise HTTPException(status_code=400, detail="Missing lat/long columns.")
+
+        # Drop missing coordinates
+        df = df.dropna(subset=[lat_col, lon_col])
+
+        # Convert to GeoDataFrame
+        gdf = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df[lon_col], df[lat_col]), crs="EPSG:4326")
+
+        # Convert to GeoJSON
+        geojson = json.loads(gdf.to_json())
+
+        # Dynamically extract numeric KPI columns (excluding lat/lon)
+        kpi_candidates = [
+            col for col in df.select_dtypes(include=["number"]).columns
+            if col not in [lat_col, lon_col]
+        ]
+
+        return {
+            "type": "FeatureCollection",
+            "features": geojson["features"],
+            "available_kpis": kpi_candidates  # <- ✨ Frontend uses this
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 
 @app.post("/map")
 def get_map_data(payload: dict):
@@ -217,3 +313,60 @@ def get_map_data(payload: dict):
     except Exception as e:
         logger.error(f"Error generating map: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@app.post("/generate-grid")
+async def generate_grid(
+    file: UploadFile = File(...),
+    kpi: str = Query(..., description="Column to aggregate (e.g., SINR)"),
+    grid_size: float = Query(0.01, description="Grid size in degrees (approx ~1km at equator)")
+):
+    try:
+        # Save uploaded GeoJSON temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".geojson") as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+
+        # Read GeoJSON normally (no need to prefix with GeoJSON:)
+        gdf = gpd.read_file(tmp_path)
+
+        if gdf.empty or 'geometry' not in gdf.columns:
+            return {"error": "Uploaded file is empty or missing geometry column."}
+
+        if kpi not in gdf.columns:
+            return {"error": f"KPI column '{kpi}' not found in uploaded data."}
+
+        # Compute bounding box
+        minx, miny, maxx, maxy = gdf.total_bounds
+
+        # Generate grid polygons
+        grid_cells = []
+        x = minx
+        while x < maxx:
+            y = miny
+            while y < maxy:
+                grid_cells.append(box(x, y, x + grid_size, y + grid_size))
+                y += grid_size
+            x += grid_size
+
+        # Create grid GeoDataFrame
+        grid = gpd.GeoDataFrame({'geometry': grid_cells}, crs=gdf.crs)
+
+        # Spatial join (points within grid cells)
+        joined = gpd.sjoin(gdf, grid, predicate='within')
+
+        # Aggregate KPI by grid cell
+        result = joined.groupby('index_right')[kpi].mean().reset_index()
+
+        # Assign results to grid
+        grid['kpi_avg'] = result.set_index('index_right')[kpi]
+        grid['kpi_avg'] = grid['kpi_avg'].fillna(0)
+
+        # Clean up temp file
+        os.remove(tmp_path)
+
+        # Return result as GeoJSON
+        return json.loads(grid.to_json())
+
+    except Exception as e:
+        return {"error": str(e)}

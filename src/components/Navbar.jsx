@@ -1,23 +1,75 @@
 import React from 'react';
-import './Styles.css';
+import './Styles.css'; // Use your Geolytics Styles.css for consistent styling
 
-const Navbar = () => {
+const Navbar = ({
+  activeSubModule = "TPGA02",
+  setActiveSubModule = () => {},
+  modules = ["GeoLytics", "Vizbot", "Automation Studio", "PM Tool"],
+  projects = ["Project A", "Project B"],
+}) => {
   return (
     <nav className="geolytics-navbar">
       <div className="navbar-left">
-        <a className="geolytics-logo" href="/">Geolytics</a>
+        {/* Sidebar Icon */}
+        <span className="icon-btn" id="sidebarCollapseBtn" onClick={() => console.log("Sidebar toggle")}>
+          <i className="fas fa-bars"></i>
+        </span>
+        {/* Logo */}
+        <a className="geolytics-logo" href="/">
+          GeoLytics
+        </a>
       </div>
       <div className="navbar-right">
-        <div className="dropdown">
-          <button className="dropdown-btn">Module — GeoLytics</button>
+        {/* Module Dropdown */}
+        <div className="dropdown-wrapper">
+          <button className="dropdown-btn">
+            Module — GeoLytics
+          </button>
+          <ul className="dropdown-list" style={{ display: 'none' }}>
+            {modules.map((mod, idx) => (
+              <li key={idx}>
+                <button className="dropdown-item">{mod}</button>
+              </li>
+            ))}
+          </ul>
         </div>
-        <div className="dropdown">
-          <button className="dropdown-btn">TPGA02</button>
+        {/* Sub-Module Dropdown */}
+        <div className="dropdown-wrapper">
+          <button className="dropdown-btn">
+            {activeSubModule}
+          </button>
+          <ul className="dropdown-list" style={{ display: 'none' }}>
+            <li>
+              <button className="dropdown-item" onClick={() => setActiveSubModule("TPGA02")}>
+                TPGA02
+              </button>
+            </li>
+            <li>
+              <button className="dropdown-item" onClick={() => setActiveSubModule("TPGA03")}>
+                TPGA03
+              </button>
+            </li>
+          </ul>
         </div>
-        <button className="icon-btn">
+        {/* Project Dropdown */}
+        <div className="dropdown-wrapper">
+          <button className="dropdown-btn">
+            Select Project
+          </button>
+          <ul className="dropdown-list" style={{ display: 'none' }}>
+            {projects.map((proj, idx) => (
+              <li key={idx}>
+                <button className="dropdown-item">{proj}</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+        {/* Settings Icon */}
+        <button className="icon-btn" title="Settings">
           <i className="fas fa-cog"></i>
         </button>
-        <button className="icon-btn">
+        {/* Profile Icon */}
+        <button className="icon-btn" title="Profile">
           <i className="fas fa-user"></i>
         </button>
       </div>
